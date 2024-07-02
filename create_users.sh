@@ -1,67 +1,99 @@
 #!/bin/bash
 
-# Log and password file locations
-LOG_FILE="/var/log/user_management.log"
-PASSWORD_FILE="/var/secure/user_passwords.txt"
-USER_FILE="$1"
+# Define log and password file paths
+LOG_PATH="/var/log/user_management.log"
+PASSWD_PATH="/var/secure/user_passwords.txt"
+USER_INPUT="$1"
 
-# Ensure a user file is provided
-if [[ -z "$USER_FILE" ]]; then
-    echo "Usage: $0 <name-of-text-file>"
+# Verify if the user file is provided
+if [ -z "$USER_INPUT" ]; then
+    echo "Usage: $0 <user-data-file>"
     exit 1
 fi
 
-# Setup log and password files
-mkdir -p /var/secure
-: > "$LOG_FILE"
-: > "$PASSWORD_FILE"
-chmod 600 "$PASSWORD_FILE"
+# Create necessary directories and files with appropriate permissions
+sudo mkdir -p /var/secure
+sudo touch "$LOG_PATH"
+sudo touch "$PASSWD_PATH"
+sudo chmod 600 "$PASSWD_PATH"
 
-# Ensure the user file ends with a newline
-sed -i -e '$a\' "$USER_FILE"
-
-# Function to trim whitespace
-trim() {
-    echo "$1" | xargs
+# Function to log messages with timestamp
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | sudo tee -a "$LOG_PATH"
 }
 
-# Process each line in the user file
-while IFS=';' read -r username groups; do
-    username=$(trim "$username")
-    groups=$(trim "$groups")
+# Ensure the input file ends with a newline
+echo "" >> "$USER_INPUT"
 
-    # Skip empty usernames
-    if [[ -z "$username" ]]; then
+while IFS=';' read -r user_name group_list; do
+    # Trim whitespace
+    user_name=$(echo "$user_name" | xargs)
+    group_list=$(echo "$group_list" | xargs)
+
+    # Skip empty lines and invalid usernames
+    if [ -z "$user_name" ]; then
         continue
     fi
 
-    # Check if user already exists
-    if id "$username" &>/dev/null; then
-        echo "User $username already exists." | tee -a "$LOG_FILE"
+    # Create a personal group for the user if it doesn't exist
+    if ! getent group "$user_name" &>/dev/null; then
+        sudo groupadd "$user_name"
+        if [ $? -eq 0 ]; then
+            log_message "Personal group $user_name created."
+        else
+            log_message "Failed to create personal group $user_name."
+            continue
+        fi
+    fi
+
+    # Create user with personal group
+    if id "$user_name" &>/dev/null; then
+        log_message "User $user_name already exists."
     else
-        # Create user with specified groups
-        useradd -m -s /bin/bash -G "$groups" "$username" &>> "$LOG_FILE"
-        if [[ $? -eq 0 ]]; then
-            echo "User $username created." | tee -a "$LOG_FILE"
+        sudo useradd -m -s /bin/bash -g "$user_name" "$user_name"
+        if [ $? -eq 0 ]; then
+            log_message "User $user_name created."
         
-            # Generate and set password
-            password=$(openssl rand -base64 12)
-            echo "$username:$password" | chpasswd &>> "$LOG_FILE"
-            if [[ $? -eq 0 ]]; then
-                echo "$username,$password" >> "$PASSWORD_FILE"
-                echo "Password set for user $username." | tee -a "$LOG_FILE"
+            # Generate a random password
+            passwd=$(openssl rand -base64 12)
+            echo "$user_name:$passwd" | sudo chpasswd
+            if [ $? -eq 0 ]; then
+                echo "$user_name,$passwd" | sudo tee -a "$PASSWD_PATH"
+                log_message "Password set for user $user_name."
             else
-                echo "Failed to set password for user $username." | tee -a "$LOG_FILE"
+                log_message "Failed to set password for user $user_name."
             fi
 
             # Set home directory permissions
-            chown "$username:$username" "/home/$username"
-            chmod 700 "/home/$username"
-            echo "User $username added to groups: $groups" | tee -a "$LOG_FILE"
+            sudo chown "$user_name:$user_name" "/home/$user_name"
+            sudo chmod 700 "/home/$user_name"
         else
-            echo "Failed to create user $username." | tee -a "$LOG_FILE"
+            log_message "Failed to create user $user_name."
+            continue
         fi
     fi
-done < "$USER_FILE"
 
-echo "User creation process completed." | tee -a "$LOG_FILE"
+    # Add user to specified groups
+    IFS=',' read -r -a groups_array <<< "$group_list"
+    for group in "${groups_array[@]}"; do
+        group=$(echo "$group" | xargs)
+        if ! getent group "$group" &>/dev/null; then
+            sudo groupadd "$group"
+            if [ $? -eq 0 ]; then
+                log_message "Group $group created."
+            else
+                log_message "Failed to create group $group."
+                continue
+            fi
+        fi
+        sudo usermod -aG "$group" "$user_name"
+        if [ $? -eq 0 ]; then
+            log_message "User $user_name added to group $group."
+        else
+            log_message "Failed to add user $user_name to group $group."
+        fi
+    done
+
+done < "$USER_INPUT"
+
+log_message "User creation process completed."
